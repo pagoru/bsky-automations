@@ -1,5 +1,5 @@
 import { load as loadEnv } from "loadenv";
-import { BskyAgent } from "npm:@atproto/api";
+import { BskyAgent, PostView } from "npm:@atproto/api";
 import dayjs from "npm:dayjs@1.11.11";
 
 await loadEnv();
@@ -10,19 +10,34 @@ const baseUrl = "https://bsky.social";
 
 const agent = new BskyAgent({ service: baseUrl });
 
+const REPEAT_REGEX = /([0-9]{0,5})d([0-9]{0,5})h/;
+const DELETE_REGEX = /r([0-9]{0,5})h/
+
 type Post = {
   createdAt: dayjs.Dayjs,
-  lastRepostAt: dayjs.Dayjs,
   
   uri: string,
   cid: string,
+}
+
+type RepeatPost = {
+  type: 'repeat',
+  
+  lastRepostAt: dayjs.Dayjs,
+  
   days: number,
   hours: number
-}
+} & Post
+
+type RemovePost = {
+  type: 'remove',
+  
+  hours: number
+} & Post
 
 if(!identifier || !password) throw 'Identifier and password cannot be empty!'
 
-let queuePosts: Post[] = [];
+let queuePosts: (RepeatPost | RemovePost)[] = [];
 
 const loopFunction = async () => {
   try {
@@ -39,53 +54,84 @@ const loopFunction = async () => {
       actor: loginResponse.data.did,
     });
     
-    const timeRegex = /([0-9]{0,5})d([0-9]{0,5})h/
-    
     const posts = postsResponse.data.feed;
-    const postsToRePost = Array.from(
+    const postsList = Array.from(
       new Map(posts.map(({post}) => [post.uri, post])).values()
-    ).map((post) => {
-      let match;
+    );
+    
+    const getPostsFromTagRegex = (regex: RegExp) => postsList.map((post): [PostView, any] | null => {
+
       for (const facet of post.record?.facets ?? [])
         for (const feature of facet.features)
-          if(feature["$type"] === "app.bsky.richtext.facet#tag")  {
-            match = new RegExp(timeRegex).exec(feature.tag);
-            if(match) break;
+          if (feature["$type"] === "app.bsky.richtext.facet#tag") {
+            const match = new RegExp(regex).exec(feature.tag);
+            if (match) return [post, match];
           }
-      return {
-        createdAt: dayjs(post.record.createdAt),
-        lastRepostAt: dayjs(post.record.createdAt),
-        uri: post.uri,
-        cid: post.cid,
-        days: parseInt(match?.[1] ?? '-1'),
-        hours: parseInt(match?.[2] ?? '-1'),
-      }
-    }).filter(post => post.days > 0 && post.hours > 0)
-      .filter(post => !queuePosts.find(qPost => qPost.uri === post.uri))
+      return null;
+    }).filter(e => e !== null);
     
-    queuePosts.push(...postsToRePost)
-    
-    console.log(`queue posts (${queuePosts.length})`)
-    for (const post of queuePosts) {
-      const endDate = post.createdAt.add(post.days, 'day');
-      const nextRepost = post.lastRepostAt.add(post.hours, 'hours')
+    const postsToRePost = getPostsFromTagRegex(REPEAT_REGEX).map<RepeatPost>(([post, match]) => ({
+      type: 'repeat',
+      uri: post.uri,
+      cid: post.cid,
       
-      //can repost
-      if(nextRepost.isBefore(dayjs())) {
-        try {
-          await agent.deleteRepost(post.uri);
-        } catch (e) {}
-        try {
-          await agent.repost(post.uri, post.cid);
-        } catch (e) {
-          //post doesnt exist anymore
+      createdAt: dayjs(post.record.createdAt),
+      lastRepostAt: dayjs(post.record.createdAt),
+      days: parseInt(match?.[1] ?? '-1'),
+      hours: parseInt(match?.[2] ?? '-1'),
+    }))
+    const postsToRemove = getPostsFromTagRegex(DELETE_REGEX).map<RemovePost>(([post, match]) => ({
+      type: 'remove',
+      uri: post.uri,
+      cid: post.cid,
+      
+      hours: parseInt(match?.[1] ?? '-1'),
+      
+      createdAt: dayjs(post.record.createdAt),
+    }))
+    
+    const toAddPosts = [...postsToRePost, ...postsToRemove]
+      .filter(post => !queuePosts.find(qPost => qPost.uri === post.uri && qPost.type === post.type))
+      
+    queuePosts.push(...toAddPosts)
+    
+    const repeatCount = queuePosts.filter(p => p.type === 'repeat').length;
+    const removeCount = queuePosts.filter(p => p.type === 'remove').length
+    
+    console.log(`queue posts - repeat (${repeatCount}) - remove (${removeCount})`)
+    for (const post of queuePosts) {
+      
+      if(post.type === 'repeat') {
+        const endDate = post.createdAt.add(post.days, 'day');
+        const nextRepost = post.lastRepostAt.add(post.hours, 'hours')
+        
+        //can repost
+        if(nextRepost.isBefore(dayjs())) {
+          try {
+            await agent.deleteRepost(post.uri);
+          } catch (e) {}
+          try {
+            await agent.repost(post.uri, post.cid);
+          } catch (e) {
+            //post doesnt exist anymore
+            queuePosts = queuePosts.filter(qPost => qPost.uri !== post.uri);
+          }
+          console.log(`- reposted ${post.uri}!`)
+        }
+        
+        if(endDate.isBefore(dayjs()))
+          queuePosts = queuePosts.filter(qPost => qPost.uri !== post.uri);
+      }
+      if(post.type === 'remove') {
+        const endDate = post.createdAt.add(post.hours, 'hours');
+        if(endDate.isBefore(dayjs())) {
+          console.log(`- removed ${post.uri}!`)
+          try {
+            await agent.deletePost(post.uri);
+          } catch (e) {}
           queuePosts = queuePosts.filter(qPost => qPost.uri !== post.uri);
         }
-        console.log(`- reposted ${post.uri}!`)
       }
-      
-      if(endDate.isBefore(dayjs()))
-        queuePosts = queuePosts.filter(qPost => qPost.uri !== post.uri);
     }
   } catch (error) {
     console.error("Error logging in or retrieving posts:", error);
