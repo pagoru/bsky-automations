@@ -112,6 +112,7 @@ const loopFunction = async () => {
           } catch (e) {}
           try {
             await agent.repost(post.uri, post.cid);
+            post.lastRepostAt = dayjs();
           } catch (e) {
             //post doesnt exist anymore
             queuePosts = queuePosts.filter(qPost => qPost.uri !== post.uri);
