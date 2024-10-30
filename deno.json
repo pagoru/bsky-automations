@@ -1,0 +1,10 @@
+{
+  "tasks": {
+    "start": "deno run -A --unstable-cron ./mod.ts"
+  },
+  "imports": {
+    "deno/": "https://deno.land/std@0.221.0/",
+    "loadenv": "https://deno.land/x/loadenv@v1.0.1/mod.ts"
+  },
+  "nodeModulesDir": "auto"
+}
