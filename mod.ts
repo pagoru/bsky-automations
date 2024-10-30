@@ -39,16 +39,16 @@ if(!identifier || !password) throw 'Identifier and password cannot be empty!'
 
 let queuePosts: (RepeatPost | RemovePost)[] = [];
 
+const loginResponse = await agent.login({
+  identifier,
+  password,
+});
+
+if (!loginResponse.success)
+  throw new Error(`Failed to log in: ${loginResponse.error}`);
+
 const loopFunction = async () => {
   try {
-    const loginResponse = await agent.login({
-      identifier,
-      password,
-    });
-    
-    if (!loginResponse.success)
-      throw new Error(`Failed to log in: ${loginResponse.error}`);
-    
     
     const postsResponse = await agent.getAuthorFeed({
       actor: loginResponse.data.did,
